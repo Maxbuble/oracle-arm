@@ -69,5 +69,5 @@ jobs:
       - name: La instancia ya existe
         if: steps.check.outputs.count != '0'
         run: echo "✅ La instancia ya existe. Desactiva este workflow."
-        if: steps.check.outputs.count != '0'
-        run: echo "✅ La instancia ya existe. Desactiva este workflow."
+
+

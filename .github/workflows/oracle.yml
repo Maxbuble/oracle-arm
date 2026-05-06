@@ -54,7 +54,7 @@ jobs:
             --subnet-id "ocid1.subnet.oc1.eu-madrid-1.aaaaaaaaibmn7uyuhrvy4xdoz4gxmnb427n73ykhesee7gpz34fbfcktcada" \
             --assign-public-ip true \
             --display-name "ia-local" \
-            --ssh-authorized-keys-file /tmp/ssh_key.pub 2>&1)
+            --ssh-authorized-keys-file /tmp/ssh_key.pub 2>&1) || true
           echo "$OUTPUT"
           if echo "$OUTPUT" | grep -q '"id"'; then
             echo "✅ INSTANCIA CREADA"

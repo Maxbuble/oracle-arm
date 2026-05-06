@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 4
 
+    concurrency:
+      group: oracle-arm
+      cancel-in-progress: true
+
     strategy:
       matrix:
         runner: [1, 2, 3]
@@ -41,6 +45,7 @@ jobs:
       # =========================
       - name: Buscar instancia
         id: instance
+        shell: bash
         run: |
           DATA=$(oci compute instance list \
             --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
@@ -50,6 +55,7 @@ jobs:
 
           if [ -z "$DATA" ] || [ "$DATA" = "null" ]; then
             echo "found=false" >> $GITHUB_OUTPUT
+            echo "mem=0" >> $GITHUB_OUTPUT
           else
             echo "found=true" >> $GITHUB_OUTPUT
             echo "id=$(echo $DATA | awk '{print $1}')" >> $GITHUB_OUTPUT
@@ -57,28 +63,23 @@ jobs:
           fi
 
       # =========================
-      # 🛑 AUTO STOP 24GB
+      # 🛑 AUTO STOP
       # =========================
       - name: Stop si ya 24GB
         if: steps.instance.outputs.mem == '24'
-        run: echo "Ya tienes 24GB. Fin."
+        run: echo "Ya tienes 24GB. Fin del workflow."
 
       # =========================
-      # 🚀 CREACIÓN MULTI-REGIÓN
+      # 🚀 CREAR INSTANCIA
       # =========================
-      - name: Crear instancia multi-region
+      - name: Crear instancia (solo runner 1)
         if: steps.instance.outputs.found == 'false' && matrix.runner == 1
         shell: bash
         run: |
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh_key.pub
 
-          REGIONS=(
-            "eu-madrid-1"
-            "eu-frankfurt-1"
-            "us-ashburn-1"
-          )
-
-          AD_SUFFIXES=("AD-1" "AD-2" "AD-3")
+          REGIONS=("eu-madrid-1" "eu-frankfurt-1" "us-ashburn-1")
+          ADs=("AD-1" "AD-2" "AD-3")
 
           SHAPES=(
             '{"ocpus":1,"memoryInGBs":6}'
@@ -89,7 +90,7 @@ jobs:
             echo "Intento $i"
 
             for REGION in "${REGIONS[@]}"; do
-              for AD in "${AD_SUFFIXES[@]}"; do
+              for AD in "${ADs[@]}"; do
                 for SHAPE in "${SHAPES[@]}"; do
 
                   OUTPUT=$(oci compute instance launch \
@@ -105,12 +106,8 @@ jobs:
                     --ssh-authorized-keys-file /tmp/ssh_key.pub 2>&1 || true)
 
                   if echo "$OUTPUT" | grep -q '"id"'; then
-                    echo "✅ Instancia creada en $REGION / $AD"
+                    echo "Instancia creada en $REGION / $AD"
                     exit 0
-                  fi
-
-                  if echo "$OUTPUT" | grep -Ei "Out of capacity|limit|capacity"; then
-                    echo "Sin capacidad en $REGION"
                   fi
 
                 done
@@ -123,7 +120,7 @@ jobs:
       # =========================
       # 🔼 UPGRADE 24GB
       # =========================
-      - name: Upgrade a 24GB multi-intento
+      - name: Upgrade a 24GB
         if: steps.instance.outputs.found == 'true' && steps.instance.outputs.mem != '24'
         shell: bash
         run: |

@@ -34,7 +34,10 @@ jobs:
             --display-name "ia-local" \
             --lifecycle-state RUNNING \
             --query 'length(data)' \
-            --raw-output 2>/dev/null || echo "0")
+            --raw-output 2>/dev/null)
+          if [ -z "$COUNT" ] || [ "$COUNT" = "null" ]; then
+            COUNT=0
+          fi
           echo "count=$COUNT" >> $GITHUB_OUTPUT
           echo "Instancias activas: $COUNT"
 
@@ -54,11 +57,11 @@ jobs:
             --ssh-authorized-keys-file /tmp/ssh_key.pub 2>&1)
           echo "$OUTPUT"
           if echo "$OUTPUT" | grep -q '"id"'; then
-            echo "INSTANCIA CREADA"
+            echo "✅ INSTANCIA CREADA"
           else
             echo "Sin capacidad, reintentando en 5 minutos"
           fi
 
       - name: La instancia ya existe
         if: steps.check.outputs.count != '0'
-        run: echo "La instancia ya existe. Desactiva este workflow."
+        run: echo "✅ La instancia ya existe. Desactiva este workflow."

@@ -1,4 +1,4 @@
-name: Oracle ARM — Híbrido PRO (parallel)
+name: Oracle ARM — Híbrido AUTO-STOP
 
 on:
   schedule:
@@ -12,11 +12,11 @@ jobs:
 
     strategy:
       matrix:
-        runner: [1,2,3]
+        runner: [1, 2, 3]
 
     steps:
-      - name: Runner info
-        run: echo "Ejecutando en runner ${{ matrix.runner }}"
+      - name: Info
+        run: echo "Runner ${{ matrix.runner }} activo"
 
       - name: Instalar OCI CLI
         run: pip install oci-cli --quiet
@@ -24,50 +24,59 @@ jobs:
       - name: Configurar OCI
         run: |
           mkdir -p ~/.oci
-          echo "[DEFAULT]" > ~/.oci/config
-          echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
-          echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
-          echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
-          echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
-          echo "key_file=/home/runner/.oci/private_key.pem" >> ~/.oci/config
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=${{ secrets.OCI_USER_OCID }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          tenancy=${{ secrets.OCI_TENANCY_OCID }}
+          region=${{ secrets.OCI_REGION }}
+          key_file=/home/runner/.oci/private_key.pem
+          EOF
+
           printf '%s' "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/private_key.pem
           chmod 600 ~/.oci/private_key.pem ~/.oci/config
 
-      - name: Buscar instancia existente
+      - name: Buscar instancia
         id: instance
+        shell: bash
         run: |
-          INSTANCE_ID=$(oci compute instance list \
+          OUTPUT=$(oci compute instance list \
             --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
             --display-name "ia-local" \
-            --query 'data[0].id' \
-            --raw-output 2>/dev/null)
+            --query 'data[0].{id:id,mem:"shape-config"."memory-in-gbs"}' \
+            --raw-output 2>/dev/null || true)
 
-          if [ "$INSTANCE_ID" = "null" ] || [ -z "$INSTANCE_ID" ]; then
-            echo "found=false" >> $GITHUB_OUTPUT
+          if [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No hay instancia"
           else
-            echo "found=true" >> $GITHUB_OUTPUT
-            echo "id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+            INSTANCE_ID=$(echo "$OUTPUT" | awk '{print $1}')
+            MEM=$(echo "$OUTPUT" | awk '{print $2}')
+
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+            echo "mem=$MEM" >> "$GITHUB_OUTPUT"
+
+            echo "Instancia encontrada (${MEM}GB)"
           fi
 
-      # =========================
-      # 🚀 CREAR INSTANCIA
-      # =========================
-      - name: Crear instancia (solo runner 1 manda)
+      - name: Ya está en 24GB
+        if: steps.instance.outputs.mem == '24'
+        run: echo "Ya tienes 24GB. Nada que hacer."
+
+      - name: Crear instancia (solo runner 1)
         if: steps.instance.outputs.found == 'false' && matrix.runner == 1
+        shell: bash
         run: |
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh_key.pub
 
-          ADS=("AD-1" "AD-2" "AD-3")
-          SHAPES=(
-            '{"ocpus":1,"memoryInGBs":6}'
-            '{"ocpus":2,"memoryInGBs":12}'
-          )
+          for intento in {1..20}; do
+            echo "Intento creación $intento"
 
-          for i in {1..25}; do
-            echo "Intento creación $i"
-
-            for AD in "${ADS[@]}"; do
-              for SHAPE in "${SHAPES[@]}"; do
+            for AD in AD-1 AD-2 AD-3; do
+              for SHAPE in \
+                '{"ocpus":1,"memoryInGBs":6}' \
+                '{"ocpus":2,"memoryInGBs":12}'; do
 
                 OUTPUT=$(oci compute instance launch \
                   --availability-domain "dSWi:EU-MADRID-1-$AD" \
@@ -78,43 +87,55 @@ jobs:
                   --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
                   --assign-public-ip true \
                   --display-name "ia-local" \
-                  --ssh-authorized-keys-file /tmp/ssh_key.pub 2>&1)
-
-                echo "$OUTPUT"
+                  --ssh-authorized-keys-file /tmp/ssh_key.pub 2>&1 || true)
 
                 if echo "$OUTPUT" | grep -q '"id"'; then
-                  echo "✅ INSTANCIA CREADA"
+                  echo "Instancia creada en $AD"
                   exit 0
                 fi
 
+                if echo "$OUTPUT" | grep -Eiq 'TooManyRequests|limit'; then
+                  echo "Rate limit detectado"
+                elif echo "$OUTPUT" | grep -Eiq 'Out of capacity|capacity'; then
+                  echo "Sin capacidad en $AD"
+                fi
               done
             done
 
             sleep $((RANDOM % 5 + 6))
           done
 
-      # =========================
-      # 🔼 UPGRADE (todos los runners ayudan)
-      # =========================
-      - name: Intentar upgrade a 24GB
-        if: steps.instance.outputs.found == 'true'
+          echo "No se pudo crear en este ciclo"
+
+      - name: Upgrade a 24GB
+        if: steps.instance.outputs.found == 'true' && steps.instance.outputs.mem != '24'
+        shell: bash
         run: |
           INSTANCE_ID="${{ steps.instance.outputs.id }}"
           TARGET='{"ocpus":4,"memoryInGBs":24}'
 
-          for i in {1..30}; do
-            echo "Runner ${{ matrix.runner }} → intento upgrade $i"
+          for intento in {1..25}; do
+            echo "Upgrade intento $intento (runner ${{ matrix.runner }})"
 
             OUTPUT=$(oci compute instance update \
               --instance-id "$INSTANCE_ID" \
-              --shape-config "$TARGET" 2>&1)
-
-            echo "$OUTPUT"
+              --shape-config "$TARGET" 2>&1 || true)
 
             if echo "$OUTPUT" | grep -q '"memoryInGBs": 24'; then
-              echo "🔥 UPGRADE CONSEGUIDO"
+              echo "Upgrade a 24GB conseguido"
               exit 0
             fi
+
+            if echo "$OUTPUT" | grep -Eiq 'TooManyRequests|limit'; then
+              echo "Rate limit en upgrade"
+            elif echo "$OUTPUT" | grep -Eiq 'Out of capacity|capacity'; then
+              echo "Sin capacidad para upgrade"
+            fi
+
+            sleep $((RANDOM % 5 + 6))
+          done
+
+          echo "Sin upgrade en este ciclo"
 
             sleep $((RANDOM % 5 + 6))
           done

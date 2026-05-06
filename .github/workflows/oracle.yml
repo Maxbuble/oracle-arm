@@ -1,14 +1,14 @@
 name: Oracle Madrid Hunter PRO
 on:
   schedule:
-    - cron: '*/5 * * * *' # Se ejecuta cada 5 minutos
-  workflow_dispatch: # Permite ejecución manual
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   hunt:
     runs-on: ubuntu-latest
-    timeout-minutes: 10 # Tiempo suficiente para los reintentos
-    
+    timeout-minutes: 5
+
     steps:
       - name: Instalar OCI CLI
         run: pip install oci-cli --quiet
@@ -16,25 +16,36 @@ jobs:
       - name: Configurar OCI
         run: |
           mkdir -p ~/.oci
-          cat > ~/.oci/config <<EOF
-          [DEFAULT]
-          user=${{ secrets.OCI_USER_OCID }}
-          fingerprint=${{ secrets.OCI_FINGERPRINT }}
-          tenancy=${{ secrets.OCI_TENANCY_OCID }}
-          region=${{ secrets.OCI_REGION }}
-          key_file=/home/runner/.oci/private_key.pem
-          EOF
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
+          echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
+          echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
+          echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
+          echo "key_file=/home/runner/.oci/private_key.pem" >> ~/.oci/config
           printf '%s' "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/private_key.pem
           chmod 600 ~/.oci/private_key.pem ~/.oci/config
 
-      - name: Bucle de Caza en Madrid
+      - name: Comprobar si la instancia ya existe
+        id: check
+        run: |
+          COUNT=$(oci compute instance list \
+            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+            --display-name "ia-local" \
+            --lifecycle-state RUNNING \
+            --query 'length(data)' \
+            --raw-output 2>/dev/null)
+          if [ -z "$COUNT" ] || [ "$COUNT" = "null" ]; then COUNT=0; fi
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          echo "Instancias activas: $COUNT"
+
+      - name: Bucle de caza en Madrid
+        if: steps.check.outputs.count == '0'
         run: |
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh.pub
-          
-          # Realiza 15 intentos internos separados por 20 segundos
-          for i in {1..15}; do
-            echo "--- Intento de caza $i ---"
-            
+
+          for i in 1 2 3; do
+            echo "--- Intento $i de 3 ---"
+
             RESPONSE=$(oci compute instance launch \
               --availability-domain "${{ secrets.OCI_AD }}" \
               --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
@@ -44,16 +55,26 @@ jobs:
               --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
               --assign-public-ip true \
               --display-name "ia-local" \
-              --ssh-authorized-keys-file /tmp/ssh.pub 2>&1)
+              --ssh-authorized-keys-file /tmp/ssh.pub 2>&1) || true
 
             if echo "$RESPONSE" | grep -qE '"lifecycle-state": "(PROVISIONING|RUNNING)"'; then
-              echo "🔥 ¡LO LOGRASTE! La instancia se está creando."
+              echo "🔥 ¡INSTANCIA CREADA! Desactiva el workflow."
               exit 0
-            elif echo "$RESPONSE" | grep -q "Out of capacity"; then
-              echo "❌ Sin stock. Reintentando en 20 segundos..."
-              sleep 20
+            elif echo "$RESPONSE" | grep -q "Out of host capacity"; then
+              echo "❌ Sin capacidad. Esperando 60s..."
+              sleep 60
+            elif echo "$RESPONSE" | grep -qE "TooManyRequests|429"; then
+              echo "⚠️ Rate limit (429). Saliendo para esperar al próximo cron..."
+              exit 0
             else
-              echo "⚠️ Error de configuración: $RESPONSE"
-              exit 1
+              echo "⚠️ Respuesta inesperada (no es fatal, sigo):"
+              echo "$RESPONSE" | head -20
+              sleep 60
             fi
           done
+
+          echo "Fin del ciclo. El próximo cron se ejecutará en 5 minutos."
+
+      - name: La instancia ya existe
+        if: steps.check.outputs.count != '0'
+        run: echo "✅ La instancia ya existe. Desactiva este workflow."

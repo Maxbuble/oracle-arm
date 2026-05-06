@@ -1,0 +1,69 @@
+  name: Oracle ARM — Crear instancia
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  create-instance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+
+    steps:
+      - name: Instalar OCI CLI
+        run: pip install oci-cli --quiet
+
+      - name: Configurar OCI
+        run: |
+          mkdir -p ~/.oci
+          cat > ~/.oci/config << 'EOF'
+          [DEFAULT]
+          user=${{ secrets.OCI_USER_OCID }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          tenancy=${{ secrets.OCI_TENANCY_OCID }}
+          region=${{ secrets.OCI_REGION }}
+          key_file=/home/runner/.oci/private_key.pem
+          EOF
+          printf '%s' '${{ secrets.OCI_PRIVATE_KEY }}' > ~/.oci/private_key.pem
+          chmod 600 ~/.oci/private_key.pem ~/.oci/config
+
+      - name: Comprobar si ya existe la instancia
+        id: check
+        run: |
+          COUNT=$(oci compute instance list \
+            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+            --display-name "ia-local" \
+            --lifecycle-state RUNNING \
+            --query 'length(data)' \
+            --raw-output 2>/dev/null || echo "0")
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          echo "Instancias activas encontradas: $COUNT"
+
+      - name: Intentar crear la instancia
+        if: steps.check.outputs.count == '0'
+        run: |
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh_key.pub
+
+          OUTPUT=$(oci compute instance launch \
+            --availability-domain "dSWi:EU-MADRID-1-AD-1" \
+            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+            --image-id "ocid1.image.oc1.eu-madrid-1.aaaaaaaa7rcvdaff45ybwthn46rkimr42mvzrdyfssah5rtwommnlnruna5q" \
+            --subnet-id "ocid1.subnet.oc1.eu-madrid-1.aaaaaaaaibmn7uyuhrvy4xdoz4gxmnb427n73ykhesee7gpz34fbfcktcada" \
+            --assign-public-ip true \
+            --display-name "ia-local" \
+            --ssh-authorized-keys-file /tmp/ssh_key.pub 2>&1)
+
+          echo "$OUTPUT"
+
+          if echo "$OUTPUT" | grep -q '"id"'; then
+            echo "✅ INSTANCIA CREADA — ya puedes desactivar este workflow"
+          else
+            echo "Sin capacidad, el workflow reintentará en 5 minutos"
+          fi
+
+      - name: La instancia ya existe
+        if: steps.check.outputs.count != '0'
+        run: echo "✅ La instancia ya existe. Desactiva este workflow desde Actions."

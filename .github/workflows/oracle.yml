@@ -47,12 +47,12 @@ jobs:
             echo "--- Intento $i de 3 ---"
 
             RESPONSE=$(oci compute instance launch \
-              --availability-domain "${{ secrets.OCI_AD }}" \
+              --availability-domain "dSWi:EU-MADRID-1-AD-1" \
               --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
               --shape "VM.Standard.A1.Flex" \
               --shape-config '{"ocpus":4,"memoryInGBs":24}' \
-              --image-id "${{ secrets.OCI_IMAGE_ID }}" \
-              --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
+              --image-id "ocid1.image.oc1.eu-madrid-1.aaaaaaaa7rcvdaff45ybwthn46rkimr42mvzrdyfssah5rtwommnlnruna5q" \
+              --subnet-id "ocid1.subnet.oc1.eu-madrid-1.aaaaaaaaibmn7uyuhrvy4xdoz4gxmnb427n73ykhesee7gpz34fbfcktcada" \
               --assign-public-ip true \
               --display-name "ia-local" \
               --ssh-authorized-keys-file /tmp/ssh.pub 2>&1) || true

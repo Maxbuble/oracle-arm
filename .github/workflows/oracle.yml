@@ -1,143 +1,95 @@
-name: Oracle ARM — Multi-Region AUTO-STOP
+name: Oracle ARM Hunter 🚀
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/5 * * * *' # Cada 5 min
   workflow_dispatch:
 
 jobs:
   oracle-arm:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
-
+    timeout-minutes: 10 # Un poco más de tiempo para los reintentos
     concurrency:
       group: oracle-arm
       cancel-in-progress: true
 
-    strategy:
-      matrix:
-        runner: [1, 2, 3]
-
     steps:
-      - name: Info runner
-        run: echo "Runner ${{ matrix.runner }} activo"
-
       - name: Instalar OCI CLI
         run: pip install oci-cli --quiet
 
       - name: Configurar OCI
         run: |
           mkdir -p ~/.oci
-          cat > ~/.oci/config <<EOF
-          [DEFAULT]
-          user=${{ secrets.OCI_USER_OCID }}
-          fingerprint=${{ secrets.OCI_FINGERPRINT }}
-          tenancy=${{ secrets.OCI_TENANCY_OCID }}
-          region=${{ secrets.OCI_REGION }}
-          key_file=/home/runner/.oci/private_key.pem
-          EOF
-
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
+          echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
+          echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
+          echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
+          echo "key_file=/home/runner/.oci/private_key.pem" >> ~/.oci/config
           printf '%s' "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/private_key.pem
           chmod 600 ~/.oci/private_key.pem ~/.oci/config
 
-      # =========================
-      # 🔍 CHECK INSTANCIA
-      # =========================
-      - name: Buscar instancia
-        id: instance
-        shell: bash
+      - name: Check Instancia Existente
+        id: check
         run: |
-          DATA=$(oci compute instance list \
+          # Buscamos el ID y la memoria actual de la instancia "ia-local"
+          INSTANCE_INFO=$(oci compute instance list \
             --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
             --display-name "ia-local" \
-            --query 'data[0].{id:id,mem:"shape-config"."memory-in-gbs"}' \
-            --raw-output 2>/dev/null || true)
-
-          if [ -z "$DATA" ] || [ "$DATA" = "null" ]; then
+            --query "data[?\"lifecycle-state\"=='RUNNING' || \"lifecycle-state\"=='STARTING'].{id:id, mem:\"shape-config\".\"memory-in-gbs\"} | [0]" \
+            --raw-output)
+          
+          if [ "$INSTANCE_INFO" == "null" ] || [ -z "$INSTANCE_INFO" ]; then
             echo "found=false" >> $GITHUB_OUTPUT
-            echo "mem=0" >> $GITHUB_OUTPUT
           else
+            ID=$(echo $INSTANCE_INFO | jq -r '.id')
+            MEM=$(echo $INSTANCE_INFO | jq -r '.mem')
             echo "found=true" >> $GITHUB_OUTPUT
-            echo "id=$(echo $DATA | awk '{print $1}')" >> $GITHUB_OUTPUT
-            echo "mem=$(echo $DATA | awk '{print $2}')" >> $GITHUB_OUTPUT
+            echo "id=$ID" >> $GITHUB_OUTPUT
+            echo "mem=$MEM" >> $GITHUB_OUTPUT
           fi
 
-      # =========================
-      # 🛑 AUTO STOP
-      # =========================
-      - name: Stop si ya 24GB
-        if: steps.instance.outputs.mem == '24'
-        run: echo "Ya tienes 24GB. Fin del workflow."
-
-      # =========================
-      # 🚀 CREAR INSTANCIA
-      # =========================
-      - name: Crear instancia (solo runner 1)
-        if: steps.instance.outputs.found == 'false' && matrix.runner == 1
-        shell: bash
+      - name: Proceso de Caza (Create o Upgrade)
         run: |
+          FOUND="${{ steps.check.outputs.found }}"
+          MEM="${{ steps.check.outputs.mem }}"
+          
+          if [ "$FOUND" == "true" ] && [ "$MEM" == "24.0" ]; then
+            echo "✅ Ya tienes la instancia de 24GB funcionando. Saliendo..."
+            exit 0
+          fi
+
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh_key.pub
 
-          REGIONS=("eu-madrid-1" "eu-frankfurt-1" "us-ashburn-1")
-          ADs=("AD-1" "AD-2" "AD-3")
-
-          SHAPES=(
-            '{"ocpus":1,"memoryInGBs":6}'
-            '{"ocpus":2,"memoryInGBs":12}'
-          )
-
-          for i in {1..20}; do
-            echo "Intento $i"
-
-            for REGION in "${REGIONS[@]}"; do
-              for AD in "${ADs[@]}"; do
-                for SHAPE in "${SHAPES[@]}"; do
-
-                  OUTPUT=$(oci compute instance launch \
-                    --region "$REGION" \
-                    --availability-domain "dSWi:${REGION}:$AD" \
-                    --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
-                    --shape "VM.Standard.A1.Flex" \
-                    --shape-config "$SHAPE" \
-                    --image-id "${{ secrets.OCI_IMAGE_ID }}" \
-                    --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
-                    --assign-public-ip true \
-                    --display-name "ia-local" \
-                    --ssh-authorized-keys-file /tmp/ssh_key.pub 2>&1 || true)
-
-                  if echo "$OUTPUT" | grep -q '"id"'; then
-                    echo "Instancia creada en $REGION / $AD"
-                    exit 0
-                  fi
-
-                done
-              done
-            done
-
-            sleep $((RANDOM % 5 + 6))
-          done
-
-      # =========================
-      # 🔼 UPGRADE 24GB
-      # =========================
-      - name: Upgrade a 24GB
-        if: steps.instance.outputs.found == 'true' && steps.instance.outputs.mem != '24'
-        shell: bash
-        run: |
-          INSTANCE_ID="${{ steps.instance.outputs.id }}"
-          TARGET='{"ocpus":4,"memoryInGBs":24}'
-
-          for i in {1..25}; do
-            echo "Upgrade intento $i"
-
-            OUTPUT=$(oci compute instance update \
-              --instance-id "$INSTANCE_ID" \
-              --shape-config "$TARGET" 2>&1 || true)
-
-            if echo "$OUTPUT" | grep -q '"memoryInGBs": 24'; then
-              echo "🔥 24GB CONSEGUIDOS"
-              exit 0
+          # Intentos en bucle para saltarse el "Out of Capacity"
+          for i in {1..30}; do
+            if [ "$FOUND" == "false" ]; then
+              echo "Intentando CREAR instancia (Intento $i)..."
+              RESPONSE=$(oci compute instance launch \
+                --availability-domain "${{ secrets.OCI_AD }}" \
+                --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+                --shape "VM.Standard.A1.Flex" \
+                --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+                --image-id "${{ secrets.OCI_IMAGE_ID }}" \
+                --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
+                --assign-public-ip true \
+                --display-name "ia-local" \
+                --ssh-authorized-keys-file /tmp/ssh_key.pub 2>&1 || true)
+            else
+              echo "Intentando UPGRADE a 24GB (Intento $i)..."
+              RESPONSE=$(oci compute instance update \
+                --instance-id "${{ steps.check.outputs.id }}" \
+                --shape-config '{"ocpus":4,"memoryInGBs":24}' 2>&1 || true)
             fi
 
-            sleep $((RANDOM % 5 + 6))
+            if echo "$RESPONSE" | grep -q "Out of capacity" || echo "$RESPONSE" | grep -q "TooManyRequests"; then
+              echo "❌ Sin stock todavía. Reintentando en breve..."
+              sleep 10
+            elif echo "$RESPONSE" | grep -iq "id"; then
+              echo "🔥 ¡CONSEGUIDO! Instancia lista o actualizada."
+              exit 0
+            else
+              echo "⚠️ Error inesperado: $RESPONSE"
+              exit 1
+            fi
           done

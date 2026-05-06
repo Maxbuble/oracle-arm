@@ -1,4 +1,4 @@
-name: Oracle Madrid Hunter PRO
+name: Oracle Madrid Hunter
 on:
   schedule:
     - cron: '*/5 * * * *'
@@ -7,7 +7,7 @@ on:
 jobs:
   hunt:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 4
 
     steps:
       - name: Instalar OCI CLI
@@ -38,43 +38,36 @@ jobs:
           echo "count=$COUNT" >> $GITHUB_OUTPUT
           echo "Instancias activas: $COUNT"
 
-      - name: Bucle de caza en Madrid
+      - name: Intentar crear la instancia
         if: steps.check.outputs.count == '0'
         run: |
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh.pub
 
-          for i in 1 2 3; do
-            echo "--- Intento $i de 3 ---"
+          RESPONSE=$(timeout 90 oci compute instance launch \
+            --availability-domain "dSWi:EU-MADRID-1-AD-1" \
+            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+            --image-id "ocid1.image.oc1.eu-madrid-1.aaaaaaaa7rcvdaff45ybwthn46rkimr42mvzrdyfssah5rtwommnlnruna5q" \
+            --subnet-id "ocid1.subnet.oc1.eu-madrid-1.aaaaaaaaibmn7uyuhrvy4xdoz4gxmnb427n73ykhesee7gpz34fbfcktcada" \
+            --assign-public-ip true \
+            --display-name "ia-local" \
+            --ssh-authorized-keys-file /tmp/ssh.pub 2>&1) || true
 
-            RESPONSE=$(oci compute instance launch \
-              --availability-domain "dSWi:EU-MADRID-1-AD-1" \
-              --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
-              --shape "VM.Standard.A1.Flex" \
-              --shape-config '{"ocpus":4,"memoryInGBs":24}' \
-              --image-id "ocid1.image.oc1.eu-madrid-1.aaaaaaaa7rcvdaff45ybwthn46rkimr42mvzrdyfssah5rtwommnlnruna5q" \
-              --subnet-id "ocid1.subnet.oc1.eu-madrid-1.aaaaaaaaibmn7uyuhrvy4xdoz4gxmnb427n73ykhesee7gpz34fbfcktcada" \
-              --assign-public-ip true \
-              --display-name "ia-local" \
-              --ssh-authorized-keys-file /tmp/ssh.pub 2>&1) || true
+          echo "$RESPONSE" | head -25
 
-            if echo "$RESPONSE" | grep -qE '"lifecycle-state": "(PROVISIONING|RUNNING)"'; then
-              echo "🔥 ¡INSTANCIA CREADA! Desactiva el workflow."
-              exit 0
-            elif echo "$RESPONSE" | grep -q "Out of host capacity"; then
-              echo "❌ Sin capacidad. Esperando 60s..."
-              sleep 60
-            elif echo "$RESPONSE" | grep -qE "TooManyRequests|429"; then
-              echo "⚠️ Rate limit (429). Saliendo para esperar al próximo cron..."
-              exit 0
-            else
-              echo "⚠️ Respuesta inesperada (no es fatal, sigo):"
-              echo "$RESPONSE" | head -20
-              sleep 60
-            fi
-          done
-
-          echo "Fin del ciclo. El próximo cron se ejecutará en 5 minutos."
+          if echo "$RESPONSE" | grep -qE '"lifecycle-state": "(PROVISIONING|RUNNING)"'; then
+            echo "🔥 ¡INSTANCIA CREADA! Desactiva el workflow."
+          elif echo "$RESPONSE" | grep -q "Out of host capacity"; then
+            echo "❌ Sin capacidad — el próximo cron reintentará en 5 minutos"
+          elif echo "$RESPONSE" | grep -qE "TooManyRequests|429"; then
+            echo "⚠️ Rate limit 429"
+          else
+            echo "⚠️ Otra cosa — el cron reintentará en 5 minutos"
+          fi
 
       - name: La instancia ya existe
+        if: steps.check.outputs.count != '0'
+        run: echo "✅ La instancia ya existe. Desactiva este workflow."
         if: steps.check.outputs.count != '0'
         run: echo "✅ La instancia ya existe. Desactiva este workflow."

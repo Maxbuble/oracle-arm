@@ -1,4 +1,4 @@
-name: Oracle ARM — Crear instancia
+name: Oracle ARM — Híbrido PRO (parallel)
 
 on:
   schedule:
@@ -6,11 +6,18 @@ on:
   workflow_dispatch:
 
 jobs:
-  create-instance:
+  oracle-arm:
     runs-on: ubuntu-latest
     timeout-minutes: 4
 
+    strategy:
+      matrix:
+        runner: [1,2,3]
+
     steps:
+      - name: Runner info
+        run: echo "Ejecutando en runner ${{ matrix.runner }}"
+
       - name: Instalar OCI CLI
         run: pip install oci-cli --quiet
 
@@ -26,42 +33,88 @@ jobs:
           printf '%s' "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/private_key.pem
           chmod 600 ~/.oci/private_key.pem ~/.oci/config
 
-      - name: Comprobar si ya existe la instancia
-        id: check
+      - name: Buscar instancia existente
+        id: instance
         run: |
-          COUNT=$(oci compute instance list \
+          INSTANCE_ID=$(oci compute instance list \
             --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
             --display-name "ia-local" \
-            --lifecycle-state RUNNING \
-            --query 'length(data)' \
+            --query 'data[0].id' \
             --raw-output 2>/dev/null)
-          if [ -z "$COUNT" ] || [ "$COUNT" = "null" ]; then
-            COUNT=0
-          fi
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "Instancias activas: $COUNT"
 
-      - name: Intentar crear la instancia
-        if: steps.check.outputs.count == '0'
+          if [ "$INSTANCE_ID" = "null" ] || [ -z "$INSTANCE_ID" ]; then
+            echo "found=false" >> $GITHUB_OUTPUT
+          else
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          fi
+
+      # =========================
+      # 🚀 CREAR INSTANCIA
+      # =========================
+      - name: Crear instancia (solo runner 1 manda)
+        if: steps.instance.outputs.found == 'false' && matrix.runner == 1
         run: |
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh_key.pub
-          OUTPUT=$(oci compute instance launch \
-            --availability-domain "dSWi:EU-MADRID-1-AD-1" \
-            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
-            --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
-            --image-id "ocid1.image.oc1.eu-madrid-1.aaaaaaaa7rcvdaff45ybwthn46rkimr42mvzrdyfssah5rtwommnlnruna5q" \
-            --subnet-id "ocid1.subnet.oc1.eu-madrid-1.aaaaaaaaibmn7uyuhrvy4xdoz4gxmnb427n73ykhesee7gpz34fbfcktcada" \
-            --assign-public-ip true \
-            --display-name "ia-local" \
-            --ssh-authorized-keys-file /tmp/ssh_key.pub 2>&1) || true
-          echo "$OUTPUT"
-          if echo "$OUTPUT" | grep -q '"id"'; then
-            echo "✅ INSTANCIA CREADA"
-          else
-            echo "Sin capacidad, reintentando en 5 minutos"
-          fi
 
-      - name: La instancia ya existe
-        if: steps.check.outputs.count != '0'
-        run: echo "✅ La instancia ya existe. Desactiva este workflow."
+          ADS=("AD-1" "AD-2" "AD-3")
+          SHAPES=(
+            '{"ocpus":1,"memoryInGBs":6}'
+            '{"ocpus":2,"memoryInGBs":12}'
+          )
+
+          for i in {1..25}; do
+            echo "Intento creación $i"
+
+            for AD in "${ADS[@]}"; do
+              for SHAPE in "${SHAPES[@]}"; do
+
+                OUTPUT=$(oci compute instance launch \
+                  --availability-domain "dSWi:EU-MADRID-1-$AD" \
+                  --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+                  --shape "VM.Standard.A1.Flex" \
+                  --shape-config "$SHAPE" \
+                  --image-id "${{ secrets.OCI_IMAGE_ID }}" \
+                  --subnet-id "${{ secrets.OCI_SUBNET_ID }}" \
+                  --assign-public-ip true \
+                  --display-name "ia-local" \
+                  --ssh-authorized-keys-file /tmp/ssh_key.pub 2>&1)
+
+                echo "$OUTPUT"
+
+                if echo "$OUTPUT" | grep -q '"id"'; then
+                  echo "✅ INSTANCIA CREADA"
+                  exit 0
+                fi
+
+              done
+            done
+
+            sleep $((RANDOM % 5 + 6))
+          done
+
+      # =========================
+      # 🔼 UPGRADE (todos los runners ayudan)
+      # =========================
+      - name: Intentar upgrade a 24GB
+        if: steps.instance.outputs.found == 'true'
+        run: |
+          INSTANCE_ID="${{ steps.instance.outputs.id }}"
+          TARGET='{"ocpus":4,"memoryInGBs":24}'
+
+          for i in {1..30}; do
+            echo "Runner ${{ matrix.runner }} → intento upgrade $i"
+
+            OUTPUT=$(oci compute instance update \
+              --instance-id "$INSTANCE_ID" \
+              --shape-config "$TARGET" 2>&1)
+
+            echo "$OUTPUT"
+
+            if echo "$OUTPUT" | grep -q '"memoryInGBs": 24'; then
+              echo "🔥 UPGRADE CONSEGUIDO"
+              exit 0
+            fi
+
+            sleep $((RANDOM % 5 + 6))
+          done

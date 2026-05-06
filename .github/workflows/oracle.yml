@@ -1,15 +1,13 @@
-name: Oracle Madrid Hunter (Bucle Activo)
-
+name: Oracle Madrid Hunter PRO
 on:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
+    - cron: '*/5 * * * *' # Se ejecuta cada 5 minutos
+  workflow_dispatch: # Permite ejecución manual
 
 jobs:
   hunt:
     runs-on: ubuntu-latest
-    # Le damos 10 minutos de tiempo máximo al job
-    timeout-minutes: 10
+    timeout-minutes: 10 # Tiempo suficiente para los reintentos
     
     steps:
       - name: Instalar OCI CLI
@@ -29,13 +27,13 @@ jobs:
           printf '%s' "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/private_key.pem
           chmod 600 ~/.oci/private_key.pem ~/.oci/config
 
-      - name: Intentar Creación Masiva
+      - name: Bucle de Caza en Madrid
         run: |
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh.pub
           
-          # Bucle de 15 intentos internos con espera de 30 segundos entre ellos
+          # Realiza 15 intentos internos separados por 20 segundos
           for i in {1..15}; do
-            echo "--- Intento de caza número $i ---"
+            echo "--- Intento de caza $i ---"
             
             RESPONSE=$(oci compute instance launch \
               --availability-domain "${{ secrets.OCI_AD }}" \
@@ -49,14 +47,13 @@ jobs:
               --ssh-authorized-keys-file /tmp/ssh.pub 2>&1)
 
             if echo "$RESPONSE" | grep -qE '"lifecycle-state": "(PROVISIONING|RUNNING)"'; then
-              echo "🔥 ¡CONSEGUIDO! Deteniendo el workflow."
+              echo "🔥 ¡LO LOGRASTE! La instancia se está creando."
               exit 0
             elif echo "$RESPONSE" | grep -q "Out of capacity"; then
-              echo "❌ Sin stock. Reintentando en 30 segundos..."
-              sleep 30
+              echo "❌ Sin stock. Reintentando en 20 segundos..."
+              sleep 20
             else
-              echo "⚠️ Error de configuración crítico. Revisa tus variables."
-              echo "$RESPONSE"
+              echo "⚠️ Error de configuración: $RESPONSE"
               exit 1
             fi
           done

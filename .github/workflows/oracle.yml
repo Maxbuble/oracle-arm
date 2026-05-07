@@ -27,53 +27,84 @@ jobs:
           printf '%s' "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/private_key.pem
           chmod 600 ~/.oci/private_key.pem ~/.oci/config
 
-      - name: Comprobar si la instancia ya existe
+      - name: Detectar instancia existente
         id: check
         run: |
-          COUNT=$(oci compute instance list \
+          DATA=$(oci --connection-timeout 10 --read-timeout 30 compute instance list \
             --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
             --display-name "ia-local" \
             --lifecycle-state RUNNING \
-            --query 'length(data)' \
+            --query 'data[0].{id:id,ocpus:"shape-config".ocpus,memory:"shape-config"."memory-in-gbs"}' \
             --raw-output 2>/dev/null)
-          if [ -z "$COUNT" ] || [ "$COUNT" = "null" ]; then COUNT=0; fi
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "Instancias activas: $COUNT"
+          if [ -z "$DATA" ] || [ "$DATA" = "null" ]; then
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "No hay instancia, intentaremos crearla"
+          else
+            ID=$(echo "$DATA" | grep -oP '"id":\s*"\K[^"]+')
+            OCPUS=$(echo "$DATA" | grep -oP '"ocpus":\s*\K[0-9.]+')
+            MEM=$(echo "$DATA" | grep -oP '"memory":\s*\K[0-9.]+')
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "id=$ID" >> $GITHUB_OUTPUT
+            echo "ocpus=$OCPUS" >> $GITHUB_OUTPUT
+            echo "Instancia existente: $OCPUS OCPU / $MEM GB"
+          fi
 
-      - name: Intentar crear la instancia
-        if: steps.check.outputs.count == '0'
+      - name: Crear instancia (cascada)
+        if: steps.check.outputs.exists == 'false'
         run: |
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh.pub
 
-          RESPONSE=$(timeout 90 oci compute instance launch \
-            --availability-domain "dSWi:EU-MADRID-1-AD-1" \
-            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
-            --shape "VM.Standard.A1.Flex" \
+          for CONFIG in '{"ocpus":4,"memoryInGBs":24}' '{"ocpus":2,"memoryInGBs":12}'; do
+            echo "▶️  Intentando $CONFIG"
+
+            RESPONSE=$(timeout 75 oci --connection-timeout 10 --read-timeout 45 \
+              compute instance launch \
+              --availability-domain "dSWi:EU-MADRID-1-AD-1" \
+              --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+              --shape "VM.Standard.A1.Flex" \
+              --shape-config "$CONFIG" \
+              --image-id "ocid1.image.oc1.eu-madrid-1.aaaaaaaa7rcvdaff45ybwthn46rkimr42mvzrdyfssah5rtwommnlnruna5q" \
+              --subnet-id "ocid1.subnet.oc1.eu-madrid-1.aaaaaaaaibmn7uyuhrvy4xdoz4gxmnb427n73ykhesee7gpz34fbfcktcada" \
+              --assign-public-ip true \
+              --display-name "ia-local" \
+              --ssh-authorized-keys-file /tmp/ssh.pub 2>&1) || true
+
+            if echo "$RESPONSE" | grep -qE '"lifecycle-state": "(PROVISIONING|RUNNING)"'; then
+              echo "🔥 INSTANCIA CREADA con $CONFIG"
+              exit 0
+            elif echo "$RESPONSE" | grep -qE "TooManyRequests|429"; then
+              echo "⚠️ Rate limit — saliendo"
+              exit 0
+            elif [ -z "$RESPONSE" ] || [ ${#RESPONSE} -lt 50 ]; then
+              echo "⏱️ Timeout en $CONFIG"
+            else
+              echo "❌ Sin capacidad para $CONFIG"
+            fi
+            sleep 5
+          done
+          echo "Reintentará en el próximo cron"
+
+      - name: Intentar redimensionar a 4/24
+        if: steps.check.outputs.exists == 'true' && steps.check.outputs.ocpus != '4.0'
+        run: |
+          echo "Intentando subir a 4 OCPU / 24 GB..."
+          RESPONSE=$(timeout 60 oci --connection-timeout 10 --read-timeout 30 \
+            compute instance update \
+            --instance-id "${{ steps.check.outputs.id }}" \
             --shape-config '{"ocpus":4,"memoryInGBs":24}' \
-            --image-id "ocid1.image.oc1.eu-madrid-1.aaaaaaaa7rcvdaff45ybwthn46rkimr42mvzrdyfssah5rtwommnlnruna5q" \
-            --subnet-id "ocid1.subnet.oc1.eu-madrid-1.aaaaaaaaibmn7uyuhrvy4xdoz4gxmnb427n73ykhesee7gpz34fbfcktcada" \
-            --assign-public-ip true \
-            --display-name "ia-local" \
-            --ssh-authorized-keys-file /tmp/ssh.pub 2>&1) || true
+            --force 2>&1) || true
 
-          echo "$RESPONSE" | head -25
-
-          if [ -z "$RESPONSE" ] || [ ${#RESPONSE} -lt 50 ]; then
-            echo "⏱️ Timeout — Oracle no respondió. Reintentando en el próximo cron"
-          elif echo "$RESPONSE" | grep -qE '"lifecycle-state": "(PROVISIONING|RUNNING)"'; then
-            echo "🔥 ¡INSTANCIA CREADA! Desactiva el workflow."
-            IP=$(echo "$RESPONSE" | grep -oP '"public-ip":\s*"\K[^"]+' | head -1)
-            curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-              -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-              -d "text=🔥 Instancia Oracle ARM creada! IP: $IP"
-          elif echo "$RESPONSE" | grep -q "Out of host capacity"; then
-            echo "❌ Sin capacidad — el próximo cron reintentará"
-          elif echo "$RESPONSE" | grep -qE "TooManyRequests|429"; then
-            echo "⚠️ Rate limit 429 — esperando al próximo cron"
+          if echo "$RESPONSE" | grep -q "Out of host capacity"; then
+            echo "❌ No hay capacidad para subir — reintentará"
+          elif echo "$RESPONSE" | grep -q '"lifecycle-state"'; then
+            echo "🔥 VM redimensionada a 4/24"
           else
-            echo "⚠️ Respuesta inesperada — el cron reintentará"
+            echo "⚠️ Respuesta inesperada"
+            echo "$RESPONSE" | head -10
           fi
 
-      - name: La instancia ya existe
+      - name: Ya está al máximo
+        if: steps.check.outputs.exists == 'true' && steps.check.outputs.ocpus == '4.0'
+        run: echo "✅ VM ya está a 4 OCPU / 24 GB. Desactiva este workflow."
         if: steps.check.outputs.count != '0'
         run: echo "✅ La instancia ya existe. Desactiva este workflow."
